@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import Image from 'next/image';
 import { useTheme } from 'next-themes';
 import { Moon, Sun, Menu, X } from 'lucide-react';
 import { useState, useEffect } from 'react';
@@ -25,9 +26,14 @@ export function Header() {
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 group">
-            <div className="w-10 h-10 bg-gradient-to-br from-primary to-accent rounded-lg flex items-center justify-center">
-              <span className="font-bold text-primary-foreground text-lg">S</span>
-            </div>
+            <Image
+              src="/stellar-logo.jpg"
+              alt="Stellar Logo"
+              width={40}
+              height={40}
+              className="rounded-lg"
+              priority
+            />
             <span className="font-bold text-lg text-foreground hidden sm:inline">
               Stellar
             </span>
