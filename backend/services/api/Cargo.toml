@@ -23,3 +23,5 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 dotenvy.workspace = true
+redis.workspace = true
+deadpool-redis.workspace = true
