@@ -1,11 +1,7 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec, Map, 
-    IntoVal, FromVal, TryFromVal,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
 
-/// Bounty Status Enum
 #[derive(Clone, Copy, PartialEq)]
 #[contracttype]
 pub enum BountyStatus {
@@ -16,7 +12,6 @@ pub enum BountyStatus {
     Cancelled = 4,
 }
 
-/// Bounty Struct
 #[contracttype]
 pub struct Bounty {
     pub id: u64,
@@ -26,12 +21,9 @@ pub struct Bounty {
     pub budget: i128,
     pub deadline: u64,
     pub status: BountyStatus,
-    pub selected_freelancer: Option<Address>,
     pub created_at: u64,
-    pub completed_at: Option<u64>,
 }
 
-/// Bounty Application Struct
 #[contracttype]
 pub struct BountyApplication {
     pub id: u64,
@@ -39,84 +31,25 @@ pub struct BountyApplication {
     pub freelancer: Address,
     pub proposal: String,
     pub proposed_budget: i128,
-    pub timeline: u64, // in days
-    pub status: String, // "pending", "accepted", "rejected"
+    pub timeline: u64,
     pub created_at: u64,
 }
 
-/// Work Submission Struct (new)
 #[contracttype]
-pub struct WorkSubmission {
-    pub bounty_id: u64,
-    pub freelancer: Address,
-    pub work_url: String,
-    pub notes: String,
-    pub submitted_at: u64,
-    pub approved: bool,
+pub enum DataKey {
+    BountyCounter,
+    AppCounter,
+    Bounty(u64),
+    Application(u64),
+    SelectedFreelancer(u64),
 }
 
-/// Bounty Contract Trait
 #[contract]
-pub trait BountyContractTrait {
-    /// Create a new bounty
-    fn create_bounty(
-        env: Env,
-        creator: Address,
-        title: String,
-        description: String,
-        budget: i128,
-        deadline: u64,
-    ) -> u64;
-
-    /// Get bounty details
-    fn get_bounty(env: Env, bounty_id: u64) -> Bounty;
-
-    /// Apply for a bounty
-    fn apply_for_bounty(
-        env: Env,
-        bounty_id: u64,
-        freelancer: Address,
-        proposal: String,
-        proposed_budget: i128,
-        timeline: u64,
-    ) -> u64;
-
-    /// Get application details
-    fn get_application(env: Env, application_id: u64) -> BountyApplication;
-
-    /// Select freelancer for bounty
-    fn select_freelancer(
-        env: Env,
-        bounty_id: u64,
-        application_id: u64,
-    ) -> bool;
-
-    /// Submit work completion (freelancer only)
-    fn submit_work(env: Env, bounty_id: u64, work_url: String, notes: String) -> bool;
-
-    /// Complete bounty (creator approves freelancer's work)
-    fn complete_bounty(env: Env, bounty_id: u64) -> bool;
-
-    /// Get work submission for a bounty
-    fn get_work_submission(env: Env, bounty_id: u64) -> Option<WorkSubmission>;
-
-    /// Cancel bounty
-    fn cancel_bounty(env: Env, bounty_id: u64) -> bool;
-
-    /// Get total bounties count
-    fn get_bounties_count(env: Env) -> u64;
-
-    /// Get bounty applications
-    fn get_applications(env: Env, bounty_id: u64) -> Vec<BountyApplication>;
-}
-
-/// Contract Implementation
-#[contractimpl]
 pub struct BountyContract;
 
 #[contractimpl]
-impl BountyContractTrait for BountyContract {
-    fn create_bounty(
+impl BountyContract {
+    pub fn create_bounty(
         env: Env,
         creator: Address,
         title: String,
@@ -126,47 +59,38 @@ impl BountyContractTrait for BountyContract {
     ) -> u64 {
         creator.require_auth();
 
-        let bounty_counter_key = Symbol::new(&env, "bounty_counter");
         let mut counter: u64 = env
             .storage()
             .persistent()
-            .get::<Symbol, u64>(&bounty_counter_key)
+            .get(&DataKey::BountyCounter)
             .unwrap_or(0);
-
         counter += 1;
-        let bounty_id = counter;
 
         let bounty = Bounty {
-            id: bounty_id,
-            creator: creator.clone(),
+            id: counter,
+            creator,
             title,
             description,
             budget,
             deadline,
             status: BountyStatus::Open,
-            selected_freelancer: None,
             created_at: env.ledger().timestamp(),
-            completed_at: None,
         };
 
-        let bounty_key = Symbol::new(&env, &format!("bounty_{}", bounty_id));
-        env.storage().persistent().set(&bounty_key, &bounty);
-        env.storage()
-            .persistent()
-            .set(&bounty_counter_key, &counter);
+        env.storage().persistent().set(&DataKey::Bounty(counter), &bounty);
+        env.storage().persistent().set(&DataKey::BountyCounter, &counter);
 
-        bounty_id
+        counter
     }
 
-    fn get_bounty(env: Env, bounty_id: u64) -> Bounty {
-        let bounty_key = Symbol::new(&env, &format!("bounty_{}", bounty_id));
+    pub fn get_bounty(env: Env, bounty_id: u64) -> Bounty {
         env.storage()
             .persistent()
-            .get::<Symbol, Bounty>(&bounty_key)
+            .get(&DataKey::Bounty(bounty_id))
             .expect("Bounty not found")
     }
 
-    fn apply_for_bounty(
+    pub fn apply_for_bounty(
         env: Env,
         bounty_id: u64,
         freelancer: Address,
@@ -176,108 +100,72 @@ impl BountyContractTrait for BountyContract {
     ) -> u64 {
         freelancer.require_auth();
 
-        let app_counter_key = Symbol::new(&env, "application_counter");
         let mut counter: u64 = env
             .storage()
             .persistent()
-            .get::<Symbol, u64>(&app_counter_key)
+            .get(&DataKey::AppCounter)
             .unwrap_or(0);
-
         counter += 1;
-        let application_id = counter;
 
         let application = BountyApplication {
-            id: application_id,
+            id: counter,
             bounty_id,
             freelancer,
             proposal,
             proposed_budget,
             timeline,
-            status: String::from_slice(&env, "pending"),
             created_at: env.ledger().timestamp(),
         };
 
-        let app_key = Symbol::new(&env, &format!("application_{}", application_id));
-        env.storage().persistent().set(&app_key, &application);
-        env.storage()
-            .persistent()
-            .set(&app_counter_key, &counter);
+        env.storage().persistent().set(&DataKey::Application(counter), &application);
+        env.storage().persistent().set(&DataKey::AppCounter, &counter);
 
-        application_id
+        counter
     }
 
-    fn get_application(env: Env, application_id: u64) -> BountyApplication {
-        let app_key = Symbol::new(&env, &format!("application_{}", application_id));
+    pub fn get_application(env: Env, application_id: u64) -> BountyApplication {
         env.storage()
             .persistent()
-            .get::<Symbol, BountyApplication>(&app_key)
+            .get(&DataKey::Application(application_id))
             .expect("Application not found")
     }
 
-    fn select_freelancer(
-        env: Env,
-        bounty_id: u64,
-        application_id: u64,
-    ) -> bool {
-        let bounty_key = Symbol::new(&env, &format!("bounty_{}", bounty_id));
-        let mut bounty = env
+    pub fn select_freelancer(env: Env, bounty_id: u64, application_id: u64) -> bool {
+        let mut bounty: Bounty = env
             .storage()
             .persistent()
-            .get::<Symbol, Bounty>(&bounty_key)
+            .get(&DataKey::Bounty(bounty_id))
             .expect("Bounty not found");
 
         bounty.creator.require_auth();
 
-        let application = Self::get_application(env.clone(), application_id);
-        assert_eq!(application.bounty_id, bounty_id, "Application does not match bounty");
+        let application: BountyApplication = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Application(application_id))
+            .expect("Application not found");
 
-        bounty.selected_freelancer = Some(application.freelancer);
+        assert!(application.bounty_id == bounty_id, "Application does not match bounty");
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SelectedFreelancer(bounty_id), &application.freelancer);
+
         bounty.status = BountyStatus::InProgress;
-
-        env.storage().persistent().set(&bounty_key, &bounty);
-
-        true
-    }
-
-    fn submit_work(env: Env, bounty_id: u64, work_url: String, notes: String) -> bool {
-        let bounty_key = Symbol::new(&env, &format!("bounty_{}", bounty_id));
-        let bounty = env
-            .storage()
-            .persistent()
-            .get::<Symbol, Bounty>(&bounty_key)
-            .expect("Bounty not found");
-
-        // Only selected freelancer can submit work
-        let freelancer = bounty.selected_freelancer.clone().expect("No freelancer selected");
-        freelancer.require_auth();
-
-        assert_eq!(bounty.status, BountyStatus::InProgress, "Bounty not in progress");
-
-        let submission = WorkSubmission {
-            bounty_id,
-            freelancer: freelancer.clone(),
-            work_url,
-            notes,
-            submitted_at: env.ledger().timestamp(),
-            approved: false,
-        };
-
-        let submission_key = Symbol::new(&env, &format!("work_submission_{}", bounty_id));
-        env.storage().persistent().set(&submission_key, &submission);
+        env.storage().persistent().set(&DataKey::Bounty(bounty_id), &bounty);
 
         true
     }
 
-    fn complete_bounty(env: Env, bounty_id: u64) -> bool {
-        let bounty_key = Symbol::new(&env, &format!("bounty_{}", bounty_id));
-        let mut bounty = env
+    pub fn complete_bounty(env: Env, bounty_id: u64) -> bool {
+        let mut bounty: Bounty = env
             .storage()
             .persistent()
-            .get::<Symbol, Bounty>(&bounty_key)
+            .get(&DataKey::Bounty(bounty_id))
             .expect("Bounty not found");
 
         bounty.creator.require_auth();
-        assert_eq!(bounty.status, BountyStatus::InProgress, "Bounty not in progress");
+        assert!(bounty.status == BountyStatus::InProgress, "Bounty not in progress");
 
         // Verify work was submitted before allowing completion
         let submission_key = Symbol::new(&env, &format!("work_submission_{}", bounty_id));
@@ -293,67 +181,32 @@ impl BountyContractTrait for BountyContract {
         }
 
         bounty.status = BountyStatus::Completed;
-        bounty.completed_at = Some(env.ledger().timestamp());
-
-        env.storage().persistent().set(&bounty_key, &bounty);
+        env.storage().persistent().set(&DataKey::Bounty(bounty_id), &bounty);
 
         true
     }
 
-    fn get_work_submission(env: Env, bounty_id: u64) -> Option<WorkSubmission> {
-        let submission_key = Symbol::new(&env, &format!("work_submission_{}", bounty_id));
-        env.storage().persistent().get(&submission_key)
-    }
-
-    fn cancel_bounty(env: Env, bounty_id: u64) -> bool {
-        let bounty_key = Symbol::new(&env, &format!("bounty_{}", bounty_id));
-        let mut bounty = env
+    pub fn cancel_bounty(env: Env, bounty_id: u64) -> bool {
+        let mut bounty: Bounty = env
             .storage()
             .persistent()
-            .get::<Symbol, Bounty>(&bounty_key)
+            .get(&DataKey::Bounty(bounty_id))
             .expect("Bounty not found");
 
         bounty.creator.require_auth();
-        assert_eq!(bounty.status, BountyStatus::Open, "Only open bounties can be cancelled");
+        assert!(bounty.status == BountyStatus::Open, "Only open bounties can be cancelled");
 
         bounty.status = BountyStatus::Cancelled;
-
-        env.storage().persistent().set(&bounty_key, &bounty);
+        env.storage().persistent().set(&DataKey::Bounty(bounty_id), &bounty);
 
         true
     }
 
-    fn get_bounties_count(env: Env) -> u64 {
-        let bounty_counter_key = Symbol::new(&env, "bounty_counter");
+    pub fn get_bounties_count(env: Env) -> u64 {
         env.storage()
             .persistent()
-            .get::<Symbol, u64>(&bounty_counter_key)
+            .get(&DataKey::BountyCounter)
             .unwrap_or(0)
-    }
-
-    fn get_applications(env: Env, bounty_id: u64) -> Vec<BountyApplication> {
-        let mut applications = Vec::new(&env);
-        let app_counter_key = Symbol::new(&env, "application_counter");
-        let counter: u64 = env
-            .storage()
-            .persistent()
-            .get::<Symbol, u64>(&app_counter_key)
-            .unwrap_or(0);
-
-        for i in 1..=counter {
-            let app_key = Symbol::new(&env, &format!("application_{}", i));
-            if let Ok(app) = env
-                .storage()
-                .persistent()
-                .get::<Symbol, BountyApplication>(&app_key)
-            {
-                if app.bounty_id == bounty_id {
-                    applications.push_back(app);
-                }
-            }
-        }
-
-        applications
     }
 }
 
@@ -366,23 +219,21 @@ mod tests {
     #[test]
     fn test_create_bounty() {
         let env = Env::default();
-        let contract = BountyContractClient::new(&env, &env.register_contract(None, BountyContract));
+        env.mock_all_auths();
+        let contract_id = env.register(BountyContract, ());
+        let client = BountyContractClient::new(&env, &contract_id);
 
-        let creator = Address::random(&env);
-        let title = String::from_slice(&env, "Test Bounty");
-        let description = String::from_slice(&env, "Test Description");
-
-        let bounty_id = contract.create_bounty(
+        let creator = Address::generate(&env);
+        let bounty_id = client.create_bounty(
             &creator,
-            &title,
-            &description,
+            &String::from_str(&env, "Test Bounty"),
+            &String::from_str(&env, "Test Description"),
             &5000i128,
             &100u64,
         );
 
         assert_eq!(bounty_id, 1);
-
-        let bounty = contract.get_bounty(&bounty_id);
+        let bounty = client.get_bounty(&bounty_id);
         assert_eq!(bounty.creator, creator);
         assert_eq!(bounty.budget, 5000i128);
     }
@@ -390,30 +241,31 @@ mod tests {
     #[test]
     fn test_apply_for_bounty() {
         let env = Env::default();
-        let contract = BountyContractClient::new(&env, &env.register_contract(None, BountyContract));
+        env.mock_all_auths();
+        let contract_id = env.register(BountyContract, ());
+        let client = BountyContractClient::new(&env, &contract_id);
 
-        let creator = Address::random(&env);
-        let freelancer = Address::random(&env);
+        let creator = Address::generate(&env);
+        let freelancer = Address::generate(&env);
 
-        let bounty_id = contract.create_bounty(
+        let bounty_id = client.create_bounty(
             &creator,
-            &String::from_slice(&env, "Test Bounty"),
-            &String::from_slice(&env, "Test Description"),
+            &String::from_str(&env, "Test Bounty"),
+            &String::from_str(&env, "Test Description"),
             &5000i128,
             &100u64,
         );
 
-        let app_id = contract.apply_for_bounty(
+        let app_id = client.apply_for_bounty(
             &bounty_id,
             &freelancer,
-            &String::from_slice(&env, "I can do this!"),
+            &String::from_str(&env, "I can do this!"),
             &4500i128,
             &30u64,
         );
 
         assert_eq!(app_id, 1);
-
-        let application = contract.get_application(&app_id);
+        let application = client.get_application(&app_id);
         assert_eq!(application.freelancer, freelancer);
     }
 

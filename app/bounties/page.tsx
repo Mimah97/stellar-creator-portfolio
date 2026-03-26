@@ -6,7 +6,8 @@ import { Header } from '@/components/header';
 import { Footer } from '@/components/footer';
 import { Button } from '@/components/ui/button';
 import { bounties, Bounty } from '@/lib/creators-data';
-import { ArrowRight, Filter, Calendar, DollarSign, Zap } from 'lucide-react';
+import { ArrowRight, Filter, Calendar, DollarSign, Zap, Search } from 'lucide-react';
+import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyContent, EmptyMedia } from '@/components/ui/empty';
 
 export default function BountiesPage() {
   const [selectedDifficulty, setSelectedDifficulty] = useState('All');
@@ -23,12 +24,12 @@ export default function BountiesPage() {
 
   const getDifficultyColor = (difficulty: string) => {
     const colors: Record<string, string> = {
-      beginner: 'bg-green-500/20 text-green-700 dark:text-green-400',
-      intermediate: 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-400',
-      advanced: 'bg-orange-500/20 text-orange-700 dark:text-orange-400',
-      expert: 'bg-red-500/20 text-red-700 dark:text-red-400',
+      beginner: 'badge-beginner',
+      intermediate: 'badge-intermediate',
+      advanced: 'badge-advanced',
+      expert: 'badge-expert',
     };
-    return colors[difficulty] || 'bg-gray-500/20 text-gray-700 dark:text-gray-400';
+    return colors[difficulty] || 'bg-muted text-muted-foreground';
   };
 
   const BountyCard = ({ bounty }: { bounty: Bounty }) => (
@@ -186,17 +187,28 @@ export default function BountiesPage() {
               </div>
 
               {filteredBounties.length === 0 && (
-                <div className="text-center py-12">
-                  <p className="text-lg text-muted-foreground mb-4">
-                    No bounties match your filters.
-                  </p>
-                  <Button variant="outline" onClick={() => {
-                    setSelectedDifficulty('All');
-                    setSelectedCategory('All');
-                  }}>
-                    Reset Filters
-                  </Button>
-                </div>
+                <Empty className="min-h-[400px]">
+                  <EmptyMedia variant="icon">
+                    <Search className="size-6" />
+                  </EmptyMedia>
+                  <EmptyHeader>
+                    <EmptyTitle>No bounties found</EmptyTitle>
+                    <EmptyDescription>
+                      Try adjusting your filters or reset to see all available bounties.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                  <EmptyContent>
+                    <Button 
+                      variant="outline" 
+                      onClick={() => {
+                        setSelectedDifficulty('All');
+                        setSelectedCategory('All');
+                      }}
+                    >
+                      Reset Filters
+                    </Button>
+                  </EmptyContent>
+                </Empty>
               )}
             </div>
           </div>
