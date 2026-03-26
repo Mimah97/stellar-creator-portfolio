@@ -1,11 +1,10 @@
-use actix_cors::Cors;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use deadpool_redis::{redis::AsyncCommands, Config, Pool, Runtime};
 use serde::{Deserialize, Serialize};
-use tracing_subscriber;
-#[derive(Clone, Serialize, Deserialize, Debug)]
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
+
+mod webhooks;
 
 // ── Request / Response types ─────────────────────────────────────────────────
 
@@ -39,15 +38,16 @@ pub struct FreelancerRegistration {
     pub bio: String,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, ToSchema)]
-pub struct ApiResponse<T: ToSchema> {
+// Generic envelope — no ToSchema bound so it works with any Serialize T.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub error: Option<String>,
     pub message: Option<String>,
 }
 
-impl<T: ToSchema> ApiResponse<T> {
+impl<T> ApiResponse<T> {
     fn ok(data: T, message: Option<String>) -> Self {
         ApiResponse { success: true, data: Some(data), error: None, message }
     }
@@ -85,19 +85,17 @@ async fn health() -> HttpResponse {
         (status = 400, description = "Invalid request body"),
     )
 )]
-async fn create_bounty(body: web::Json<BountyRequest>) -> HttpResponse {
+async fn create_bounty(redis: web::Data<Pool>, body: web::Json<BountyRequest>) -> HttpResponse {
     tracing::info!("Creating bounty: {:?}", body.title);
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
-        serde_json::json!({
-            "bounty_id": 1,
-            "creator": body.creator,
-            "title": body.title,
-            "budget": body.budget,
-            "status": "open"
-        }),
-        Some("Bounty created successfully".to_string()),
-    );
-    HttpResponse::Created().json(response)
+    let data = serde_json::json!({
+        "bounty_id": 1,
+        "creator": body.creator,
+        "title": body.title,
+        "budget": body.budget,
+        "status": "open"
+    });
+    webhooks::trigger_webhooks(&redis, "bounty.created", data.clone()).await;
+    HttpResponse::Created().json(ApiResponse::ok(data, Some("Bounty created successfully".into())))
 }
 
 /// List bounties (paginated)
@@ -111,11 +109,10 @@ async fn create_bounty(body: web::Json<BountyRequest>) -> HttpResponse {
     responses((status = 200, description = "Paginated list of bounties"))
 )]
 async fn list_bounties() -> HttpResponse {
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
+    HttpResponse::Ok().json(ApiResponse::ok(
         serde_json::json!({ "bounties": [], "total": 0, "page": 1, "limit": 10 }),
-        None,
-    );
-    HttpResponse::Ok().json(response)
+        None::<String>,
+    ))
 }
 
 /// Get a single bounty by ID
@@ -127,15 +124,15 @@ async fn list_bounties() -> HttpResponse {
         (status = 404, description = "Bounty not found"),
     )
 )]
-async fn get_bounty(path: web::Path<u64>) -> HttpResponse {
+async fn get_bounty(redis: web::Data<Pool>, path: web::Path<u64>) -> HttpResponse {
     let bounty_id = path.into_inner();
     let cache_key = format!("api:bounty:{}", bounty_id);
 
     if let Ok(mut conn) = redis.get().await {
-        if let Ok(cached_data) = conn.get::<_, String>(&cache_key).await {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&cached_data) {
+        if let Ok(cached) = conn.get::<String, String>(cache_key.clone()).await {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&cached) {
                 tracing::debug!("Cache hit for {}", cache_key);
-                return HttpResponse::Ok().json(ApiResponse::ok(parsed, None));
+                return HttpResponse::Ok().json(ApiResponse::ok(parsed, None::<String>));
             }
         }
     }
@@ -143,10 +140,10 @@ async fn get_bounty(path: web::Path<u64>) -> HttpResponse {
     let data = serde_json::json!({ "id": bounty_id, "title": "Sample Bounty", "status": "open" });
 
     if let Ok(mut conn) = redis.get().await {
-        let _ = conn.set_ex::<_, _, ()>(&cache_key, data.to_string(), 60).await;
+        let _: Result<(), _> = conn.set_ex(cache_key, data.to_string(), 60).await;
     }
 
-    HttpResponse::Ok().json(ApiResponse::ok(data, None))
+    HttpResponse::Ok().json(ApiResponse::ok(data, None::<String>))
 }
 
 /// Apply for a bounty
@@ -161,20 +158,20 @@ async fn get_bounty(path: web::Path<u64>) -> HttpResponse {
     )
 )]
 async fn apply_for_bounty(
+    redis: web::Data<Pool>,
     path: web::Path<u64>,
     body: web::Json<BountyApplication>,
 ) -> HttpResponse {
     let bounty_id = path.into_inner();
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
-        serde_json::json!({
-            "application_id": 1,
-            "bounty_id": bounty_id,
-            "freelancer": body.freelancer,
-            "status": "pending"
-        }),
-        Some("Application submitted successfully".to_string()),
-    );
-    HttpResponse::Created().json(response)
+    let data = serde_json::json!({
+        "application_id": 1,
+        "bounty_id": bounty_id,
+        "freelancer": body.freelancer,
+        "status": "pending"
+    });
+    webhooks::trigger_webhooks(&redis, "application.submitted", data.clone()).await;
+    HttpResponse::Created()
+        .json(ApiResponse::ok(data, Some("Application submitted successfully".to_string())))
 }
 
 /// Register a freelancer profile
@@ -187,11 +184,10 @@ async fn apply_for_bounty(
     )
 )]
 async fn register_freelancer(body: web::Json<FreelancerRegistration>) -> HttpResponse {
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
+    HttpResponse::Created().json(ApiResponse::ok(
         serde_json::json!({ "name": body.name, "discipline": body.discipline, "verified": false }),
         Some("Freelancer registered successfully".to_string()),
-    );
-    HttpResponse::Created().json(response)
+    ))
 }
 
 /// List freelancers
@@ -206,14 +202,13 @@ async fn register_freelancer(body: web::Json<FreelancerRegistration>) -> HttpRes
 )]
 async fn list_freelancers(
     query: web::Query<std::collections::HashMap<String, String>>,
-    redis: web::Data<Pool>,
+    _redis: web::Data<Pool>,
 ) -> HttpResponse {
     let discipline = query.get("discipline").cloned().unwrap_or_default();
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
+    HttpResponse::Ok().json(ApiResponse::ok(
         serde_json::json!({ "freelancers": [], "total": 0, "filters": { "discipline": discipline } }),
-        None,
-    );
-    HttpResponse::Ok().json(response)
+        None::<String>,
+    ))
 }
 
 /// Get a freelancer by Stellar address
@@ -225,15 +220,15 @@ async fn list_freelancers(
         (status = 404, description = "Freelancer not found"),
     )
 )]
-async fn get_freelancer(path: web::Path<String>) -> HttpResponse {
+async fn get_freelancer(redis: web::Data<Pool>, path: web::Path<String>) -> HttpResponse {
     let address = path.into_inner();
     let cache_key = format!("api:freelancer:{}", address);
 
     if let Ok(mut conn) = redis.get().await {
-        if let Ok(cached_data) = conn.get::<_, String>(&cache_key).await {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&cached_data) {
+        if let Ok(cached) = conn.get::<String, String>(cache_key.clone()).await {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&cached) {
                 tracing::debug!("Cache hit for {}", cache_key);
-                return HttpResponse::Ok().json(ApiResponse::ok(parsed, None));
+                return HttpResponse::Ok().json(ApiResponse::ok(parsed, None::<String>));
             }
         }
     }
@@ -246,10 +241,10 @@ async fn get_freelancer(path: web::Path<String>) -> HttpResponse {
     });
 
     if let Ok(mut conn) = redis.get().await {
-        let _ = conn.set_ex::<_, _, ()>(&cache_key, data.to_string(), 60).await;
+        let _: Result<(), _> = conn.set_ex(cache_key, data.to_string(), 60).await;
     }
 
-    HttpResponse::Ok().json(ApiResponse::ok(data, None))
+    HttpResponse::Ok().json(ApiResponse::ok(data, None::<String>))
 }
 
 /// Get escrow details
@@ -263,11 +258,10 @@ async fn get_freelancer(path: web::Path<String>) -> HttpResponse {
 )]
 async fn get_escrow(path: web::Path<u64>) -> HttpResponse {
     let escrow_id = path.into_inner();
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
+    HttpResponse::Ok().json(ApiResponse::ok(
         serde_json::json!({ "id": escrow_id, "status": "active", "amount": 0 }),
-        None,
-    );
-    HttpResponse::Ok().json(response)
+        None::<String>,
+    ))
 }
 
 /// Release escrowed funds
@@ -280,13 +274,12 @@ async fn get_escrow(path: web::Path<u64>) -> HttpResponse {
         (status = 404, description = "Escrow not found"),
     )
 )]
-async fn release_escrow(path: web::Path<u64>) -> HttpResponse {
+async fn release_escrow(redis: web::Data<Pool>, path: web::Path<u64>) -> HttpResponse {
     let escrow_id = path.into_inner();
-    let response: ApiResponse<serde_json::Value> = ApiResponse::ok(
-        serde_json::json!({ "id": escrow_id, "status": "released" }),
-        Some("Funds released successfully".to_string()),
-    );
-    HttpResponse::Ok().json(response)
+    let data = serde_json::json!({ "id": escrow_id, "status": "released" });
+    webhooks::trigger_webhooks(&redis, "escrow.released", data.clone()).await;
+    HttpResponse::Ok()
+        .json(ApiResponse::ok(data, Some("Funds released successfully".to_string())))
 }
 
 // ── OpenAPI spec ─────────────────────────────────────────────────────────────
@@ -311,12 +304,19 @@ async fn release_escrow(path: web::Path<u64>) -> HttpResponse {
         get_freelancer,
         get_escrow,
         release_escrow,
+        webhooks::register_webhook,
+        webhooks::list_webhooks,
+        webhooks::delete_webhook,
     ),
-    components(schemas(BountyRequest, BountyApplication, FreelancerRegistration)),
+    components(schemas(
+        BountyRequest, BountyApplication, FreelancerRegistration,
+        webhooks::WebhookRegistration, webhooks::Webhook,
+    )),
     tags(
         (name = "bounties",    description = "Bounty management"),
         (name = "freelancers", description = "Freelancer registry"),
         (name = "escrow",      description = "Payment escrow"),
+        (name = "webhooks",    description = "Webhook registration & delivery"),
     )
 )]
 pub struct ApiDoc;
@@ -340,9 +340,11 @@ async fn main() -> std::io::Result<()> {
 
     let host = std::env::var("API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
 
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-    let cfg = Config::from_url(redis_url);
-    let redis_pool = cfg.create_pool(Some(Runtime::Tokio1)).expect("Failed to create Redis pool");
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis_pool = Config::from_url(redis_url)
+        .create_pool(Some(Runtime::Tokio1))
+        .expect("Failed to create Redis pool");
 
     tracing::info!("Starting Stellar API on {}:{}", host, port);
     tracing::info!("Swagger UI available at http://{}:{}/swagger-ui/", host, port);
@@ -354,12 +356,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(redis_pool.clone()))
             .wrap(middleware::Logger::default())
             .wrap(middleware::NormalizePath::trim())
-            // Swagger UI at /swagger-ui/
             .service(
                 SwaggerUi::new("/swagger-ui/{_:.*}")
                     .url("/api-docs/openapi.json", openapi.clone()),
             )
-            // API routes
             .route("/health", web::get().to(health))
             .route("/api/bounties", web::post().to(create_bounty))
             .route("/api/bounties", web::get().to(list_bounties))
@@ -370,6 +370,9 @@ async fn main() -> std::io::Result<()> {
             .route("/api/freelancers/{address}", web::get().to(get_freelancer))
             .route("/api/escrow/{id}", web::get().to(get_escrow))
             .route("/api/escrow/{id}/release", web::post().to(release_escrow))
+            .route("/api/webhooks", web::post().to(webhooks::register_webhook))
+            .route("/api/webhooks", web::get().to(webhooks::list_webhooks))
+            .route("/api/webhooks/{id}", web::delete().to(webhooks::delete_webhook))
     })
     .bind((host.as_str(), port))?
     .run()
@@ -384,14 +387,14 @@ mod tests {
 
     #[test]
     fn test_api_response_ok() {
-        let response: ApiResponse<String> = ApiResponse::ok("test".to_string(), None);
+        let response = ApiResponse::ok("test".to_string(), None::<String>);
         assert!(response.success);
         assert_eq!(response.data, Some("test".to_string()));
     }
 
     #[test]
     fn test_api_response_err() {
-        let response: ApiResponse<String> = ApiResponse::err("error".to_string());
+        let response = ApiResponse::<String>::err("error".to_string());
         assert!(!response.success);
         assert_eq!(response.error, Some("error".to_string()));
     }
@@ -399,11 +402,11 @@ mod tests {
     #[test]
     fn test_openapi_spec_is_valid() {
         let spec = ApiDoc::openapi();
-        // Ensure all expected paths are present
         let paths = &spec.paths.paths;
         assert!(paths.contains_key("/health"));
         assert!(paths.contains_key("/api/bounties"));
         assert!(paths.contains_key("/api/freelancers"));
         assert!(paths.contains_key("/api/escrow/{id}"));
+        assert!(paths.contains_key("/api/webhooks"));
     }
 }
