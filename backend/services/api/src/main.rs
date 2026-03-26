@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use deadpool_redis::{redis::AsyncCommands, Config, Pool, Runtime};
 use serde::{Deserialize, Serialize};
