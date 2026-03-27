@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 mod metrics;
 
 use actix_cors::Cors;
+use actix_web::{
+    dev::Server, http::StatusCode, middleware, web, App, HttpResponse, HttpServer, ResponseError,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::{pending, Future};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
 use actix_web::{http::StatusCode, middleware, web, App, HttpResponse, HttpServer, ResponseError};
 use deadpool_redis::{redis::AsyncCommands, Config, Pool, Runtime};
 use serde::{Deserialize, Serialize};
@@ -283,6 +291,102 @@ fn parse_i64(value: i128, field: &str) -> Result<i64, ApiError> {
 fn parse_u64_to_i64(value: u64, field: &str) -> Result<i64, ApiError> {
     i64::try_from(value)
         .map_err(|_| ApiError::BadRequest(format!("{field} is outside the supported range")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ShutdownSignal {
+    SigInt,
+    SigTerm,
+}
+
+async fn select_shutdown_signal<SigInt, SigTerm>(sigint: SigInt, sigterm: SigTerm) -> ShutdownSignal
+where
+    SigInt: Future<Output = ()>,
+    SigTerm: Future<Output = ()>,
+{
+    tokio::select! {
+        _ = sigint => ShutdownSignal::SigInt,
+        _ = sigterm => ShutdownSignal::SigTerm,
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    let signal = {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        select_shutdown_signal(
+            async {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    tracing::error!(%error, "failed to listen for SIGINT");
+                    pending::<()>().await;
+                }
+            },
+            async {
+                match signal(SignalKind::terminate()) {
+                    Ok(mut sigterm) => {
+                        sigterm.recv().await;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to listen for SIGTERM");
+                        pending::<()>().await;
+                    }
+                }
+            },
+        )
+        .await
+    };
+
+    #[cfg(not(unix))]
+    let signal = {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to listen for SIGINT");
+            pending::<()>().await;
+        }
+        ShutdownSignal::SigInt
+    };
+
+    tracing::info!(
+        ?signal,
+        "shutdown signal received; starting graceful shutdown"
+    );
+}
+
+fn configure_api_routes(cfg: &mut web::ServiceConfig) {
+    cfg.route("/health", web::get().to(health))
+        .route("/api/bounties", web::post().to(create_bounty))
+        .route("/api/bounties", web::get().to(list_bounties))
+        .route("/api/bounties/{id}", web::get().to(get_bounty))
+        .route("/api/bounties/{id}/apply", web::post().to(apply_for_bounty))
+        .route(
+            "/api/freelancers/register",
+            web::post().to(register_freelancer),
+        )
+        .route("/api/freelancers", web::get().to(list_freelancers))
+        .route("/api/freelancers/{address}", web::get().to(get_freelancer))
+        .route("/api/escrow/{id}", web::get().to(get_escrow))
+        .route("/api/escrow/{id}/release", web::post().to(release_escrow));
+}
+
+fn build_http_server(
+    listener: TcpListener,
+    state: AppState,
+    openapi: utoipa::openapi::OpenApi,
+) -> std::io::Result<Server> {
+    Ok(HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(state.clone()))
+            .wrap(Cors::permissive())
+            .wrap(middleware::Logger::default())
+            .wrap(middleware::NormalizePath::trim())
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),
+            )
+            .configure(configure_api_routes)
+    })
+    .shutdown_signal(shutdown_signal())
+    .listen(listener)?
+    .run())
 }
 
 /// Health check
@@ -1092,6 +1196,10 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Prometheus metrics available at http://{}:{}/metrics", host, port);
 
+    let listener = TcpListener::bind((host.as_str(), port))?;
+    build_http_server(listener, state, openapi)?.await?;
+    tracing::info!("Stellar API shutdown complete");
+    Ok(())
     let server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(db_pool.clone()))
@@ -1143,6 +1251,11 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::{body::to_bytes, http::StatusCode, test, App};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::sync::{oneshot, Notify};
+    use tokio::time::{sleep, timeout, Duration};
     use actix_web::http::StatusCode;
 
     #[test]
@@ -1179,6 +1292,146 @@ mod tests {
         assert_eq!(
             ApiError::ContractInvocation("x".to_string()).status_code(),
             StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[actix_web::test]
+    async fn shutdown_signal_selector_resolves_on_sigint() {
+        let (sigint_tx, sigint_rx) = oneshot::channel::<()>();
+        let (_sigterm_tx, sigterm_rx) = oneshot::channel::<()>();
+
+        let shutdown = tokio::spawn(select_shutdown_signal(
+            async move {
+                let _ = sigint_rx.await;
+            },
+            async move {
+                let _ = sigterm_rx.await;
+            },
+        ));
+
+        sigint_tx.send(()).expect("sigint send should succeed");
+
+        assert_eq!(
+            shutdown.await.expect("join should succeed"),
+            ShutdownSignal::SigInt
+        );
+    }
+
+    #[actix_web::test]
+    async fn shutdown_signal_selector_returns_first_completed_signal() {
+        let (sigint_tx, sigint_rx) = oneshot::channel::<()>();
+        let (sigterm_tx, sigterm_rx) = oneshot::channel::<()>();
+
+        let shutdown = tokio::spawn(select_shutdown_signal(
+            async move {
+                let _ = sigint_rx.await;
+            },
+            async move {
+                let _ = sigterm_rx.await;
+            },
+        ));
+
+        sigterm_tx.send(()).expect("sigterm send should succeed");
+        let _ = sigint_tx.send(());
+
+        assert_eq!(
+            shutdown.await.expect("join should succeed"),
+            ShutdownSignal::SigTerm
+        );
+    }
+
+    #[actix_web::test]
+    async fn server_drains_in_flight_requests_during_graceful_shutdown() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind to an open port");
+        let address = listener
+            .local_addr()
+            .expect("listener should expose its bound address");
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        let server = HttpServer::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+
+            move || {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+
+                App::new().route(
+                    "/slow",
+                    web::get().to(move || {
+                        let started = Arc::clone(&started);
+                        let release = Arc::clone(&release);
+
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            HttpResponse::Ok().body("done")
+                        }
+                    }),
+                )
+            }
+        })
+        .shutdown_signal(async move {
+            let _ = shutdown_rx.await;
+        })
+        .shutdown_timeout(1)
+        .listen(listener)
+        .expect("server should listen on the test socket")
+        .run();
+
+        let server_task = tokio::spawn(server);
+
+        let response_task = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(address)
+                .await
+                .expect("request should connect while server is accepting traffic");
+            let request = format!(
+                "GET /slow HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                address
+            );
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .expect("request should be written");
+
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .await
+                .expect("response should be readable");
+
+            String::from_utf8(response).expect("response should be valid utf-8")
+        });
+
+        timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("request should reach the handler before shutdown begins");
+        shutdown_tx
+            .send(())
+            .expect("shutdown trigger should be delivered");
+
+        sleep(Duration::from_millis(50)).await;
+        release.notify_waiters();
+
+        let response = timeout(Duration::from_secs(2), response_task)
+            .await
+            .expect("response task should finish before timeout")
+            .expect("response task should not panic");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("\r\ndone"));
+
+        timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server should finish graceful shutdown")
+            .expect("server task should not panic")
+            .expect("graceful shutdown should not return an error");
+
+        assert!(
+            TcpStream::connect(address).await.is_err(),
+            "server should stop accepting new connections after shutdown"
         );
     }
 }
