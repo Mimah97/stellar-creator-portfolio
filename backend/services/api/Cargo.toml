@@ -34,3 +34,4 @@ utoipa-swagger-ui.workspace = true
 reqwest.workspace = true
 actix-web-prom.workspace = true
 prometheus.workspace = true
+stellar-common = { path = "../common" }
