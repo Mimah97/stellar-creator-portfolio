@@ -1,0 +1,153 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import type { ApiResponse, CreatorReputationPayload } from '@/lib/api-models';
+import { isApiSuccess } from '@/lib/api-models';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+function StarRow({ value, max = 5 }: { value: number; max?: number }) {
+  const rounded = Math.round(value);
+  return (
+    <div className="flex gap-0.5" aria-label={`${value.toFixed(1)} out of ${max} stars`}>
+      {Array.from({ length: max }, (_, i) => (
+        <span
+          key={i}
+          className={i < rounded ? 'text-amber-500' : 'text-muted-foreground/40'}
+          aria-hidden
+        >
+          ★
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function Histogram({
+  aggregation,
+}: {
+  aggregation: CreatorReputationPayload['aggregation'];
+}) {
+  const total = aggregation.totalReviews;
+  if (total === 0) return null;
+
+  const rows: { label: string; count: number }[] = [
+    { label: '5 stars', count: aggregation.stars5 },
+    { label: '4 stars', count: aggregation.stars4 },
+    { label: '3 stars', count: aggregation.stars3 },
+    { label: '2 stars', count: aggregation.stars2 },
+    { label: '1 star', count: aggregation.stars1 },
+  ];
+
+  return (
+    <div className="space-y-2 mt-6" aria-label="Rating distribution">
+      <p className="text-sm font-semibold text-foreground">Rating breakdown</p>
+      {rows.map((row) => {
+        const pct = Math.round((row.count / total) * 100);
+        return (
+          <div key={row.label} className="flex items-center gap-3 text-sm">
+            <span className="w-16 text-muted-foreground shrink-0">{row.label}</span>
+            <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary transition-all"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="w-10 text-right tabular-nums text-muted-foreground">{row.count}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function CreatorReputation({ creatorId }: { creatorId: string }) {
+  const [payload, setPayload] = useState<CreatorReputationPayload | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/creators/${encodeURIComponent(creatorId)}/reputation`,
+          { headers: { Accept: 'application/json' } },
+        );
+        if (!res.ok) {
+          if (!cancelled) setFailed(true);
+          return;
+        }
+        const body = (await res.json()) as ApiResponse<CreatorReputationPayload>;
+        if (cancelled) return;
+        if (isApiSuccess(body) && body.data.aggregation.totalReviews > 0) {
+          setPayload(body.data);
+        }
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [creatorId]);
+
+  if (failed || !payload) {
+    return null;
+  }
+
+  const { aggregation, recentReviews } = payload;
+
+  return (
+    <section className="border-b border-border bg-muted/20 py-12">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 className="text-2xl font-bold text-foreground mb-2">Client reviews</h2>
+        <p className="text-muted-foreground mb-8">
+          Ratings from verified clients who worked with this creator.
+        </p>
+
+        <div className="bg-card border border-border rounded-xl p-6 sm:p-8">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-8">
+            <div className="text-center sm:text-left">
+              <div className="text-4xl font-bold text-primary tabular-nums">
+                {aggregation.averageRating.toFixed(1)}
+              </div>
+              <div className="text-sm text-muted-foreground">out of 5</div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <StarRow value={aggregation.averageRating} />
+              <p className="text-sm text-muted-foreground">
+                Based on {aggregation.totalReviews}{' '}
+                {aggregation.totalReviews === 1 ? 'review' : 'reviews'}
+              </p>
+            </div>
+          </div>
+
+          <Histogram aggregation={aggregation} />
+
+          <div className="mt-10 space-y-6">
+            <h3 className="text-lg font-semibold text-foreground">Recent feedback</h3>
+            <ul className="space-y-6">
+              {recentReviews.map((rev) => (
+                <li
+                  key={rev.id}
+                  className="border-b border-border pb-6 last:border-0 last:pb-0"
+                >
+                  <div className="flex flex-wrap items-center gap-2 mb-2">
+                    <StarRow value={rev.rating} />
+                    <span className="text-sm font-medium text-foreground">{rev.title}</span>
+                    <span className="text-xs text-muted-foreground">· {rev.createdAt}</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground mb-1">by {rev.reviewerName}</p>
+                  <p className="text-foreground leading-relaxed">{rev.body}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}

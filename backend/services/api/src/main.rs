@@ -3,6 +3,8 @@ use actix_web::{http, web, App, HttpServer, HttpResponse, middleware};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber;
 
+mod reputation;
+
 // ==================== Domain Models ====================
 
 /// Machine-readable error codes returned by the API.
@@ -497,6 +499,26 @@ async fn get_creator(path: web::Path<String>) -> HttpResponse {
     }
 }
 
+/// Aggregated reputation and recent reviews for a creator profile.
+async fn get_creator_reputation(path: web::Path<String>) -> HttpResponse {
+    let creator_id = path.into_inner();
+    tracing::info!("Fetching reputation for creator: {}", creator_id);
+
+    let reviews = reputation::reviews_for_creator(&creator_id);
+    let aggregation = reputation::aggregate_reviews(&reviews);
+    let recent_reviews = reputation::recent_reviews(&reviews, 8);
+
+    let payload = reputation::CreatorReputationPayload {
+        creator_id: creator_id.clone(),
+        aggregation,
+        recent_reviews,
+    };
+
+    let response: ApiResponse<reputation::CreatorReputationPayload> =
+        ApiResponse::ok(payload, None);
+    HttpResponse::Ok().json(response)
+}
+
 /// Escape escrow
 async fn get_escrow(path: web::Path<u64>) -> HttpResponse {
     let escrow_id = path.into_inner();
@@ -603,6 +625,10 @@ async fn main() -> std::io::Result<()> {
             // Creator routes
             .route("/api/creators", web::get().to(list_creators))
             .route("/api/creators/{id}", web::get().to(get_creator))
+            .route(
+                "/api/creators/{id}/reputation",
+                web::get().to(get_creator_reputation),
+            )
             // Freelancer routes
             .route("/api/freelancers/register", web::post().to(register_freelancer))
             .route("/api/freelancers", web::get().to(list_freelancers))
@@ -805,6 +831,20 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn creator_reputation_integration_returns_aggregation() {
+        use actix_web::test as awtest;
+
+        let app = awtest::init_service(
+            App::new().route(
+                "/api/creators/{id}/reputation",
+                web::get().to(get_creator_reputation),
+            ),
+        )
+        .await;
+
+        let req = awtest::TestRequest::get()
+            .uri("/api/creators/alex-studio/reputation")
+            .to_request();
     async fn escrow_get_integration_returns_active_payload() {
         use actix_web::test as awtest;
 
@@ -820,6 +860,28 @@ mod tests {
         let body = awtest::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["creatorId"], "alex-studio");
+        let total = json["data"]["aggregation"]["totalReviews"].as_u64().unwrap();
+        assert!(total >= 1);
+        let avg = json["data"]["aggregation"]["averageRating"].as_f64().unwrap();
+        assert!(avg > 0.0);
+        assert!(json["data"]["recentReviews"].as_array().unwrap().len() >= 1);
+    }
+
+    #[actix_web::test]
+    async fn creator_reputation_unknown_id_returns_empty_aggregation() {
+        use actix_web::test as awtest;
+
+        let app = awtest::init_service(
+            App::new().route(
+                "/api/creators/{id}/reputation",
+                web::get().to(get_creator_reputation),
+            ),
+        )
+        .await;
+
+        let req = awtest::TestRequest::get()
+            .uri("/api/creators/unknown-creator/reputation")
         assert_eq!(json["data"]["id"], 7);
         assert_eq!(json["data"]["status"], "active");
     }
@@ -841,6 +903,8 @@ mod tests {
 
         let body = awtest::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["aggregation"]["totalReviews"], 0);
+        assert_eq!(json["data"]["aggregation"]["averageRating"], 0.0);
         assert_eq!(json["success"], true);
         assert_eq!(json["data"]["status"], "released");
         assert!(json["data"]["transaction_id"].is_string());

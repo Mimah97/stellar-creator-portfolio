@@ -7,6 +7,7 @@ import { Footer } from '@/components/footer';
 import { ProjectCard } from '@/components/project-card';
 import { Button } from '@/components/ui/button';
 import { creators } from '@/lib/creators-data';
+import { CreatorReputation } from '@/components/creator-reputation';
 import { ArrowLeft, Linkedin, Twitter, ExternalLink } from 'lucide-react';
 
 interface CreatorProfilePageProps {
@@ -166,6 +167,8 @@ export default function CreatorProfilePage({ params }: CreatorProfilePageProps) 
             </div>
           </div>
         </section>
+
+        <CreatorReputation creatorId={creator.id} />
 
         {/* Skills Section */}
         {creator.skills.length > 0 && (

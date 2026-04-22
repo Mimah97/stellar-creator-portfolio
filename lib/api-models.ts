@@ -117,3 +117,33 @@ export function isApiFailure<T>(res: ApiResponse<T>): res is ApiFailure {
 export function isValidationError(error: ApiError): boolean {
   return error.code === 'VALIDATION_ERROR' && Array.isArray(error.fieldErrors);
 }
+
+// ── Creator reputation (GET /api/creators/:id/reputation) ───────────────────
+
+/** Single public review on a creator profile. */
+export interface PublicReview {
+  id: string;
+  rating: number;
+  title: string;
+  body: string;
+  reviewerName: string;
+  createdAt: string;
+}
+
+/** Histogram and average for a creator’s reviews. */
+export interface ReputationAggregation {
+  averageRating: number;
+  totalReviews: number;
+  stars5: number;
+  stars4: number;
+  stars3: number;
+  stars2: number;
+  stars1: number;
+}
+
+/** Payload for creator reputation + recent reviews. */
+export interface CreatorReputationPayload {
+  creatorId: string;
+  aggregation: ReputationAggregation;
+  recentReviews: PublicReview[];
+}
