@@ -39,6 +39,10 @@ sha2 = "0.10"
 hex = "0.4"
 stellar-sdk = "21.0"
 
+# Auth
+jsonwebtoken = "9"
+actix-web-httpauth = "0.8"
+
 # Utilities
 thiserror = "1.0"
 tracing = "0.1"

@@ -14,6 +14,7 @@ path = "src/main.rs"
 actix-web.workspace = true
 actix-cors = "0.7"
 actix-rt.workspace = true
+actix-web-httpauth.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,6 +24,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 futures.workspace = true
+jsonwebtoken.workspace = true
 
 [profile.release]
 opt-level = 3

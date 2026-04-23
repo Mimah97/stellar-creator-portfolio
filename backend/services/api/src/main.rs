@@ -3,6 +3,7 @@ use actix_web::{http, web, App, HttpServer, HttpResponse, middleware};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber;
 
+mod auth;
 mod reputation;
 
 // ==================== Domain Models ====================
@@ -615,27 +616,26 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors_middleware())
             .wrap(middleware::Logger::default())
             .wrap(middleware::NormalizePath::trim())
-            // Health check
+            // Health check (public)
             .route("/health", web::get().to(health))
-            // Bounty routes
-            .route("/api/bounties", web::post().to(create_bounty))
+            // Public read-only routes
             .route("/api/bounties", web::get().to(list_bounties))
             .route("/api/bounties/{id}", web::get().to(get_bounty))
-            .route("/api/bounties/{id}/apply", web::post().to(apply_for_bounty))
-            // Creator routes
             .route("/api/creators", web::get().to(list_creators))
             .route("/api/creators/{id}", web::get().to(get_creator))
-            .route(
-                "/api/creators/{id}/reputation",
-                web::get().to(get_creator_reputation),
-            )
-            // Freelancer routes
-            .route("/api/freelancers/register", web::post().to(register_freelancer))
+            .route("/api/creators/{id}/reputation", web::get().to(get_creator_reputation))
             .route("/api/freelancers", web::get().to(list_freelancers))
             .route("/api/freelancers/{address}", web::get().to(get_freelancer))
-            // Escrow routes
             .route("/api/escrow/{id}", web::get().to(get_escrow))
-            .route("/api/escrow/{id}/release", web::post().to(release_escrow))
+            // Protected write routes — require valid JWT
+            .service(
+                web::scope("")
+                    .wrap(auth::JwtMiddleware)
+                    .route("/api/bounties", web::post().to(create_bounty))
+                    .route("/api/bounties/{id}/apply", web::post().to(apply_for_bounty))
+                    .route("/api/freelancers/register", web::post().to(register_freelancer))
+                    .route("/api/escrow/{id}/release", web::post().to(release_escrow)),
+            )
     })
     .bind((host.parse::<std::net::IpAddr>().unwrap(), port))?
     .run()
@@ -845,6 +845,21 @@ mod tests {
         let req = awtest::TestRequest::get()
             .uri("/api/creators/alex-studio/reputation")
             .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+        let body = awtest::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["creatorId"], "alex-studio");
+        let total = json["data"]["aggregation"]["totalReviews"].as_u64().unwrap();
+        assert!(total >= 1);
+        let avg = json["data"]["aggregation"]["averageRating"].as_f64().unwrap();
+        assert!(avg > 0.0);
+        assert!(json["data"]["recentReviews"].as_array().unwrap().len() >= 1);
+    }
+
+    #[actix_web::test]
     async fn escrow_get_integration_returns_active_payload() {
         use actix_web::test as awtest;
 
@@ -860,12 +875,8 @@ mod tests {
         let body = awtest::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
-        assert_eq!(json["data"]["creatorId"], "alex-studio");
-        let total = json["data"]["aggregation"]["totalReviews"].as_u64().unwrap();
-        assert!(total >= 1);
-        let avg = json["data"]["aggregation"]["averageRating"].as_f64().unwrap();
-        assert!(avg > 0.0);
-        assert!(json["data"]["recentReviews"].as_array().unwrap().len() >= 1);
+        assert_eq!(json["data"]["id"], 7);
+        assert_eq!(json["data"]["status"], "active");
     }
 
     #[actix_web::test]
@@ -882,8 +893,14 @@ mod tests {
 
         let req = awtest::TestRequest::get()
             .uri("/api/creators/unknown-creator/reputation")
-        assert_eq!(json["data"]["id"], 7);
-        assert_eq!(json["data"]["status"], "active");
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+        let body = awtest::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["aggregation"]["totalReviews"], 0);
+        assert_eq!(json["data"]["aggregation"]["averageRating"], 0.0);
     }
 
     #[actix_web::test]
@@ -903,10 +920,153 @@ mod tests {
 
         let body = awtest::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["data"]["aggregation"]["totalReviews"], 0);
-        assert_eq!(json["data"]["aggregation"]["averageRating"], 0.0);
         assert_eq!(json["success"], true);
         assert_eq!(json["data"]["status"], "released");
         assert!(json["data"]["transaction_id"].is_string());
+    }
+
+    // ── JWT-protected route integration tests ─────────────────────────────────
+
+    fn build_protected_app() -> actix_web::App<
+        impl actix_web::dev::ServiceFactory<
+            actix_web::dev::ServiceRequest,
+            Config = (),
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+            InitError = (),
+        >,
+    > {
+        App::new().service(
+            web::scope("")
+                .wrap(auth::JwtMiddleware)
+                .route("/api/bounties", web::post().to(create_bounty))
+                .route("/api/bounties/{id}/apply", web::post().to(apply_for_bounty))
+                .route("/api/freelancers/register", web::post().to(register_freelancer))
+                .route("/api/escrow/{id}/release", web::post().to(release_escrow)),
+        )
+    }
+
+    #[actix_web::test]
+    async fn create_bounty_without_token_returns_401() {
+        use actix_web::test as awtest;
+        std::env::remove_var("JWT_SECRET");
+
+        let app = awtest::init_service(build_protected_app()).await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/bounties")
+            .set_json(serde_json::json!({
+                "creator": "wallet-1",
+                "title": "Test",
+                "description": "desc",
+                "budget": 1000,
+                "deadline": 9999999999u64
+            }))
+            .to_request();
+
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn create_bounty_with_valid_token_returns_201() {
+        use actix_web::test as awtest;
+        std::env::remove_var("JWT_SECRET");
+        let token = auth::tests::make_token("wallet-1", "creator", 3600);
+
+        let app = awtest::init_service(build_protected_app()).await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/bounties")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(serde_json::json!({
+                "creator": "wallet-1",
+                "title": "Design Bounty",
+                "description": "desc",
+                "budget": 2000,
+                "deadline": 9999999999u64
+            }))
+            .to_request();
+
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::CREATED);
+
+        let body = awtest::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["title"], "Design Bounty");
+    }
+
+    #[actix_web::test]
+    async fn apply_for_bounty_without_token_returns_401() {
+        use actix_web::test as awtest;
+        std::env::remove_var("JWT_SECRET");
+
+        let app = awtest::init_service(build_protected_app()).await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/bounties/1/apply")
+            .set_json(serde_json::json!({
+                "bounty_id": 1,
+                "freelancer": "wallet-2",
+                "proposal": "I can do this",
+                "proposed_budget": 1800,
+                "timeline": 7
+            }))
+            .to_request();
+
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn register_freelancer_without_token_returns_401() {
+        use actix_web::test as awtest;
+        std::env::remove_var("JWT_SECRET");
+
+        let app = awtest::init_service(build_protected_app()).await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/freelancers/register")
+            .set_json(serde_json::json!({
+                "name": "Jane",
+                "discipline": "Writing",
+                "bio": "Writer"
+            }))
+            .to_request();
+
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn release_escrow_without_token_returns_401() {
+        use actix_web::test as awtest;
+        std::env::remove_var("JWT_SECRET");
+
+        let app = awtest::init_service(build_protected_app()).await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/escrow/5/release")
+            .to_request();
+
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn release_escrow_with_valid_token_returns_200() {
+        use actix_web::test as awtest;
+        std::env::remove_var("JWT_SECRET");
+        let token = auth::tests::make_token("wallet-1", "creator", 3600);
+
+        let app = awtest::init_service(build_protected_app()).await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/escrow/5/release")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+
+        let body = awtest::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["status"], "released");
     }
 }
