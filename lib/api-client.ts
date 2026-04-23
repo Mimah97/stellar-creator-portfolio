@@ -17,6 +17,7 @@ import {
   type Creator,
   type CreatorReputationPayload,
   type PaginatedData,
+  type ReviewSubmission,
   isApiSuccess,
 } from './api-models';
 
@@ -144,4 +145,14 @@ export async function fetchFreelancers(params?: {
 /** GET /api/freelancers/:address */
 export async function fetchFreelancer(address: string): Promise<unknown> {
   return apiFetch(`/api/freelancers/${address}`);
+}
+
+/** POST /api/reviews — submit a review after bounty completion. */
+export async function submitReview(
+  data: ReviewSubmission,
+): Promise<{ reviewId: string }> {
+  return apiFetch('/api/reviews', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
 }

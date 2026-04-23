@@ -148,6 +148,34 @@ export interface CreatorReputationPayload {
   recentReviews: PublicReview[];
 }
 
+// ── Review submission ─────────────────────────────────────────────────────────────
+
+/** Payload sent when submitting a review after bounty completion. */
+export interface ReviewSubmission {
+  bountyId: string;
+  creatorId: string;
+  rating: number;       // 1–5
+  title: string;
+  body: string;
+  reviewerName: string;
+}
+
+/** Validated review submission — all fields confirmed non-empty. */
+export type ValidatedReview = ReviewSubmission;
+
+/** Validate a ReviewSubmission. Returns field errors or null if valid. */
+export function validateReview(data: Partial<ReviewSubmission>): FieldError[] | null {
+  const errors: FieldError[] = [];
+  if (!data.bountyId?.trim()) errors.push({ field: 'bountyId', message: 'Bounty ID is required' });
+  if (!data.creatorId?.trim()) errors.push({ field: 'creatorId', message: 'Creator ID is required' });
+  if (!data.rating || data.rating < 1 || data.rating > 5)
+    errors.push({ field: 'rating', message: 'Rating must be between 1 and 5' });
+  if (!data.title?.trim()) errors.push({ field: 'title', message: 'Title is required' });
+  if (!data.body?.trim()) errors.push({ field: 'body', message: 'Feedback is required' });
+  if (!data.reviewerName?.trim()) errors.push({ field: 'reviewerName', message: 'Your name is required' });
+  return errors.length > 0 ? errors : null;
+}
+
 // ── Creator (mirrors Rust Creator struct) ─────────────────────────────────────
 
 export interface Creator {

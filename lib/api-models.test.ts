@@ -6,6 +6,7 @@ import {
   isApiSuccess,
   isApiFailure,
   isValidationError,
+  validateReview,
 } from './api-models';
 
 describe('apiSuccess', () => {
@@ -91,5 +92,60 @@ describe('isValidationError', () => {
   it('returns false for VALIDATION_ERROR without fieldErrors', () => {
     const res = apiFailure('VALIDATION_ERROR', 'Invalid');
     expect(isValidationError(res.error)).toBe(false);
+  });
+});
+
+describe('validateReview', () => {
+  const valid = {
+    bountyId: 'b-1',
+    creatorId: 'c-1',
+    rating: 5,
+    title: 'Great work',
+    body: 'Delivered on time and exceeded expectations.',
+    reviewerName: 'Jane D.',
+  };
+
+  it('returns null for a fully valid submission', () => {
+    expect(validateReview(valid)).toBeNull();
+  });
+
+  it('requires bountyId', () => {
+    const errors = validateReview({ ...valid, bountyId: '' });
+    expect(errors?.some((e) => e.field === 'bountyId')).toBe(true);
+  });
+
+  it('requires creatorId', () => {
+    const errors = validateReview({ ...valid, creatorId: '  ' });
+    expect(errors?.some((e) => e.field === 'creatorId')).toBe(true);
+  });
+
+  it('requires rating >= 1', () => {
+    const errors = validateReview({ ...valid, rating: 0 });
+    expect(errors?.some((e) => e.field === 'rating')).toBe(true);
+  });
+
+  it('requires rating <= 5', () => {
+    const errors = validateReview({ ...valid, rating: 6 });
+    expect(errors?.some((e) => e.field === 'rating')).toBe(true);
+  });
+
+  it('requires title', () => {
+    const errors = validateReview({ ...valid, title: '' });
+    expect(errors?.some((e) => e.field === 'title')).toBe(true);
+  });
+
+  it('requires body', () => {
+    const errors = validateReview({ ...valid, body: '   ' });
+    expect(errors?.some((e) => e.field === 'body')).toBe(true);
+  });
+
+  it('requires reviewerName', () => {
+    const errors = validateReview({ ...valid, reviewerName: '' });
+    expect(errors?.some((e) => e.field === 'reviewerName')).toBe(true);
+  });
+
+  it('returns multiple errors for multiple missing fields', () => {
+    const errors = validateReview({ bountyId: 'b-1', creatorId: 'c-1' });
+    expect((errors ?? []).length).toBeGreaterThan(1);
   });
 });
